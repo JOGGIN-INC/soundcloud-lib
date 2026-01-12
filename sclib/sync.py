@@ -1,49 +1,39 @@
-""" Soundcloud api sync objects """
-import urllib.request
 from urllib.request import urlopen
 import json
-import random
-import re
-from ssl import SSLContext
-from concurrent import futures
-import mutagen
 from . import util
+import random
+import io
+import mutagen
+from concurrent import futures
+from ssl import SSLContext
 
-
-SSL_VERIFY=True
+ssl_verify=False
 
 def get_ssl_setting():
-    """ Get ssl context """
-    if SSL_VERIFY:
+    if ssl_verify:
         return None
-    return SSLContext()
+    else:
+        return SSLContext()
 
 def get_url(url):
-    """ Get url """
-    with urlopen(url, context=get_ssl_setting()) as client:
-        text = client.read()
-    return text
+    return urlopen(url,context=get_ssl_setting()).read()
 
 def get_page(url):
-    """ get text from url """
     return get_url(url).decode('utf-8')
 
 def get_obj_from(url):
-    """ Get object from url """
     try:
         return json.loads(get_page(url))
-    except Exception as exc:  # pylint: disable=broad-except
-        util.eprint(type(exc), str(exc))
+    except Exception as e:
+        util.eprint(type(e), str(e))
         return False
 
 
-class UnsupportedFormatError(Exception):
-    """ unsupported format """
+class UnsupportedFormatError(Exception): pass
 
 
 
 class SoundcloudAPI:
-    """ Soundcloud api client """
     __slots__ = [
         'client_id',
     ]
@@ -52,6 +42,7 @@ class SoundcloudAPI:
     STREAM_URL  = "https://api.soundcloud.com/i1/tracks/{track_id}/streams?client_id={client_id}"
     TRACKS_URL  = "https://api-v2.soundcloud.com/tracks?ids={track_ids}&client_id={client_id}"
     PROGRESSIVE_URL = "https://api-v2.soundcloud.com/media/soundcloud:tracks:723290971/53dc4e74-0414-4ab8-8741-a07ac56c787f/stream/progressive?client_id={client_id}"
+    LIKES_URL = "https://api-v2.soundcloud.com/users/{user_id}/likes?limit=200&client_id={client_id}"
 
     TRACK_API_MAX_REQUEST_SIZE = 50
 
@@ -61,40 +52,77 @@ class SoundcloudAPI:
         else:
             self.client_id = None
 
-
+    # Scrapes a working client_id
     def get_credentials(self):
-        """ get creds """
         url = random.choice(util.SCRAPE_URLS)
         page_text = get_page(url)
         script_urls = util.find_script_urls(page_text)
         for script in script_urls:
             if not self.client_id:
-                if type(script) is str and not "":  # pylint: disable=simplifiable-condition
+                if type(script) is str and not "":
                     js_text = f'{get_page(script)}'
                     self.client_id = util.find_client_id(js_text)
 
     def resolve(self, url):
-        """ Resolve url """
         if not self.client_id:
             self.get_credentials()
-
-        if not re.match(util.SC_TRACK_RESOLVE_REGEX, url):
-            with urllib.request.urlopen(url, timeout=10) as response:
-                url = response.geturl()
-
         url = SoundcloudAPI.RESOLVE_URL.format(
             url=url,
             client_id=self.client_id
         )
 
         obj = get_obj_from(url)
+
+        # print(json.dumps(obj, indent=2))  # TODO: remove
+
         if obj['kind'] == 'track':
             return Track(obj=obj, client=self)
-        if obj['kind'] in ('playlist', 'system-playlist'):
+        elif obj['kind'] == 'playlist':
             playlist = Playlist(obj=obj, client=self)
             playlist.clean_attributes()
             return playlist
-        return None
+        elif obj['kind'] == 'user':       # get likes of resolved user
+            obj = self.get_likes(obj)
+            likes = Likes(obj=obj, client=self)
+            likes.clean_attributes()
+            return likes
+
+
+    def get_likes(self, obj, limit=None):
+        user_id = obj['id']
+
+        url = SoundcloudAPI.LIKES_URL.format(
+            user_id=user_id,
+            client_id=self.client_id
+        )
+
+        all_items = []
+
+        while url:
+            page = get_obj_from(url)
+
+            if not page or 'collection' not in page:
+                break
+
+            collection = page['collection']
+            all_items.extend(collection)
+
+            # Optional hard stop if you want a max number of likes
+            if limit and len(all_items) >= limit:
+                return all_items[:limit]
+
+            url = page.get('next_href')
+
+            # next_href already includes client_id, but sometimes it doesn’t
+            if url and 'client_id=' not in url:
+                url += f"&client_id={self.client_id}"
+
+            # print(json.dumps(obj, indent=2))  # TODO: remove
+            # print(json.dumps(obj[0], indent=2))  # TODO: remove
+
+        return all_items
+
+
 
     def _format_get_tracks_urls(self, track_ids):
         urls = []
@@ -109,7 +137,6 @@ class SoundcloudAPI:
         return urls
 
     def get_tracks(self, *track_ids):
-        """ Get a list of track ids """
         threads = []
         with futures.ThreadPoolExecutor() as executor:
             for url in self._format_get_tracks_urls(track_ids):
@@ -126,7 +153,6 @@ class SoundcloudAPI:
 
 
 class Track:
-    """ Track object """
     __slots__ = [
         # Track Attributes
         "artwork_url",
@@ -194,11 +220,9 @@ class Track:
             self.__setattr__(key, obj[key] if key in obj else None)
 
         self.client = client
-        self.ready = False
         self.clean_attributes()
 
     def clean_attributes(self):
-        """ clean attrs """
         username = self.user['username']
         title = self.title
         if " - " in title:
@@ -210,44 +234,45 @@ class Track:
 #
 #   Uses urllib
 #
-    def write_mp3_to(self, file):
-        """ Write mp3 data to file """
+    def write_mp3_to(self, fp):
         try:
-            file.seek(0)
+            fp.seek(0)
             stream_url = self.get_stream_url()
-            with urlopen(stream_url,context=get_ssl_setting()) as client:
-                data = client.read()
-            file.write(data)
-            file.seek(0)
+            if stream_url:
+                fp.write(urlopen(stream_url,context=get_ssl_setting()).read())
+                fp.seek(0)
 
-            album_artwork = None
-            if self.artwork_url:
-                with urlopen(util.get_large_artwork_url(self.artwork_url),context=get_ssl_setting()) as client:
-                    album_artwork = client.read()
+                album_artwork = None
+                if self.artwork_url:
+                    album_artwork = urlopen(
+                        util.get_large_artwork_url(
+                            self.artwork_url
+                        ),context=get_ssl_setting()
+                    ).read()
 
-            self.write_track_id3(file, album_artwork)
-        except (TypeError, ValueError) as exc:
+                self.write_track_id3(fp, album_artwork)
+        except (TypeError, ValueError) as e:
             util.eprint('File object passed to "write_mp3_to" must be opened in read/write binary ("wb+") mode')
-            util.eprint(exc)
-            raise exc
+            util.eprint(e)
+            raise e
 
     def get_prog_url(self):
-        """ Get url """
         for transcode in self.media['transcodings']:
             if transcode['format']['protocol'] == 'progressive':
                 return transcode['url'] + "?client_id=" + self.client.client_id
-        raise UnsupportedFormatError("As of soundcloud-lib 0.5.0, tracks that are not marked as 'Downloadable' cannot be downloaded because this library does not yet assemble HLS streams.")
+        # raise UnsupportedFormatError("As of soundcloud-lib 0.5.0, tracks that are not marked as 'Downloadable' cannot be downloaded because this library does not yet assemble HLS streams.")
 #
 #   Uses urllib
 #
     def get_stream_url(self):
-        """ Get stream url """
         prog_url = self.get_prog_url()
-        url_response = get_obj_from(prog_url)
-        return url_response['url']
+        if prog_url:
+            url_response = get_obj_from(prog_url)
+            return url_response['url']
+        else:
+            return None
 
     def write_track_id3(self, track_fp, album_artwork:bytes = None):
-        """ Write track meta """
         try:
             audio = mutagen.File(track_fp, filename="x.mp3")
             audio.add_tags()
@@ -286,14 +311,13 @@ class Track:
             self.ready = True
             track_fp.seek(0)
             return track_fp
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError) as e:
             util.eprint('File object passed to "write_track_metadata" must be opened in read/write binary ("wb+") mode')
-            raise exc
+            raise e
 
 
 
 class Playlist:
-    """ Playlist """
     __slots__ = [
         "artwork_url",
         "created_at",
@@ -337,14 +361,11 @@ class Playlist:
     def __init__(self, *, obj=None, client=None):
         assert obj
         assert "id" in obj
-        self.tracks = []
         for key in self.__slots__:
             self.__setattr__(key, obj[key] if key in obj else None)
         self.client = client
-        self.ready = False
 
     def clean_attributes(self):
-        """ Clean attributes """
         if self.ready:
             return
         self.ready = True
@@ -363,8 +384,55 @@ class Playlist:
         self.tracks = track_objects
 
     def __len__(self):
-        return len(self.tracks)
+        return int(self.track_count)
 
     def __iter__(self):
         self.clean_attributes()
-        yield from self.tracks
+        for track in self.tracks:
+            yield track
+
+class Likes:
+    __slots__ = [
+    "created_at",
+    "kind",
+    "track",
+
+    # internal attributes
+    "client",
+    "obj",
+    "tracks",
+    "ready"
+    ]
+
+    RESOLVE_THRESHOLD = 100
+
+    def __init__(self, *, obj=None, client=None):
+        assert obj
+        if not obj:
+            raise ValueError("[Like]: obj must not be None")
+        if not isinstance(client, SoundcloudAPI):
+            raise ValueError(f"[Like]: client must be an instance of SoundcloudAPI not {type(client)}")
+
+        for key in self.__slots__:
+            self.__setattr__(key, obj[key] if key in obj else None)
+        self.obj = obj
+        self.client = client
+
+
+    # TODO: write better documentation
+    # TODO: implement a check for invalid tracks like Playlist class
+    # Converts all tracks found in Likes object to tracks and stores them in self.tracks
+    def clean_attributes(self):
+        if self.ready:
+            return
+        self.ready = True
+        track_objects = []  # type: [Track] # all completed track objects
+
+        for i in range(len(self.obj)):      # For every object within likes object
+            if 'track' in self.obj[i]:      # Check if the object is a 'track' or something else (playlist also possible)
+                track_objects.append(Track(obj=self.obj[i]['track'], client=self.client))   # Create track object and put it in track_objects[]
+            else:
+                # print(i,' is not a track')  # TODO: remove
+                continue
+
+        self.tracks = track_objects
