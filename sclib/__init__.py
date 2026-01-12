@@ -1,2 +1,1 @@
-""" Top level module imports """
-from .sync import SoundcloudAPI, Track, Playlist
+from .sync import SoundcloudAPI, Track, Playlist, Likes
