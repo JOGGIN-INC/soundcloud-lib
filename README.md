@@ -61,6 +61,11 @@ async def main():
         await track.write_mp3_to(f)
 ```
 
+## Known Limitations
+
+**Non-downloadable tracks cannot be downloaded.**
+Tracks marked as "Downloadable" on SoundCloud have a direct MP3 representation. Tracks that are not downloadable only have HLS stream representations, which this library does not currently assemble. HLS support is a potential future addition.
+
 ## License
 
 MIT
