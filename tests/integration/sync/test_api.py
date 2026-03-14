@@ -11,6 +11,7 @@ def sc_client():
     api.get_credentials()
     return api
 
+@pytest.mark.integration
 def test_fetch_client_id(sync_api: SoundcloudAPI):
     """ Test client id can be fetched """
     assert sync_api.client_id is not None
