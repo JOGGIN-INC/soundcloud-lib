@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soundcloud-lib"
+version = "0.6.1"
+description = "Python SoundCloud API wrapper"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Ian Murphy", email = "3jackdaws@gmail.com" },
+    { name = "JOGGIN-INC" },
+]
+requires-python = ">=3.11"
+dependencies = [
+    "mutagen",
+    "bs4",
+    "aiohttp",
+]
+
+[project.urls]
+Homepage = "https://github.com/JOGGIN-INC/soundcloud-lib"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sclib*"]
